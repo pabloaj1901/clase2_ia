@@ -265,15 +265,96 @@ if not st.session_state.get('modelo_entrenado', False):
 else:
     st.markdown("Dibuja un dígito (0-9) en el canvas de abajo y presiona **Predecir**.")
     
+    def preprocess_canvas_image(image_data):
+        """
+        Preprocesa la imagen del canvas para simular el formato real
+        de sklearn digits (8x8, rango 0-16, dígito centrado).
+        """
+        img = image_data.astype(np.uint8)
+        # Convertir a escala de grises
+        img_gray = np.mean(img[:, :, :3], axis=2)
+        
+        # --- PASO 1: Encontrar bounding box del dígito dibujado ---
+        threshold = 30  # Umbral para detectar trazos
+        coords = np.argwhere(img_gray > threshold)
+        
+        if coords.size == 0:
+            return None  # No se dibujó nada
+        
+        y_min, x_min = coords.min(axis=0)
+        y_max, x_max = coords.max(axis=0)
+        
+        # Recortar solo la región del dígito
+        digit_crop = img_gray[y_min:y_max+1, x_min:x_max+1]
+        
+        # --- PASO 2: Hacer la región cuadrada con padding ---
+        h, w = digit_crop.shape
+        max_dim = max(h, w)
+        # Agregar padding proporcional (20% de margen como en sklearn digits)
+        padding = int(max_dim * 0.3)
+        
+        square_size = max_dim + 2 * padding
+        square_img = np.zeros((square_size, square_size), dtype=np.float64)
+        
+        # Centrar el dígito en el cuadrado
+        y_offset = (square_size - h) // 2
+        x_offset = (square_size - w) // 2
+        square_img[y_offset:y_offset+h, x_offset:x_offset+w] = digit_crop
+        
+        # --- PASO 3: Redimensionar a 8x8 usando antialiasing ---
+        img_pil = Image.fromarray(square_img.astype(np.uint8))
+        img_resized = img_pil.resize((8, 8), Image.LANCZOS)
+        img_array = np.array(img_resized, dtype=np.float64)
+        
+        # --- PASO 4: Aplicar suavizado gaussiano leve ---
+        from scipy.ndimage import gaussian_filter
+        img_array = gaussian_filter(img_array, sigma=0.5)
+        
+        # --- PASO 5: Escalar al rango 0-16 (formato sklearn digits) ---
+        if img_array.max() > 0:
+            img_array = (img_array / img_array.max()) * 16.0
+        
+        return img_array
+    
+    def predict_digit(img_array):
+        """Realiza la predicción con el modelo entrenado."""
+        img_flat = img_array.flatten().reshape(1, -1)
+        
+        modelo = st.session_state['modelo']
+        scaler = st.session_state['scaler']
+        pca = st.session_state['pca']
+        usar_pca = st.session_state['usar_pca']
+        
+        img_scaled = scaler.transform(img_flat)
+        if usar_pca and pca is not None:
+            img_scaled = pca.transform(img_scaled)
+        
+        prediccion = modelo.predict(img_scaled)
+        
+        # Probabilidades si están disponibles
+        probs = None
+        if hasattr(modelo, 'predict_proba'):
+            probs = modelo.predict_proba(img_scaled)[0]
+        
+        return prediccion[0], probs
+    
     try:
         from streamlit_drawable_canvas import st_canvas
+        
+        st.markdown("""
+        **Tips para mejor precisión:**
+        - Dibuja el dígito **grande y centrado** en el canvas
+        - Usa trazos **gruesos**
+        - Dibuja de forma **simple**, similar a dígitos impresos
+        """)
         
         col_draw, col_result = st.columns([1, 1])
         
         with col_draw:
+            stroke = st.slider("Grosor del trazo", 15, 40, 25)
             canvas_result = st_canvas(
                 fill_color="rgba(255, 255, 255, 0.3)",
-                stroke_width=20,
+                stroke_width=stroke,
                 stroke_color="#FFFFFF",
                 background_color="#000000",
                 height=280,
@@ -283,55 +364,61 @@ else:
             )
         
         with col_result:
-            if st.button("🔍 Predecir Dígito"):
+            if st.button("🔍 Predecir Dígito", type="primary"):
                 if canvas_result.image_data is not None:
-                    # Procesar imagen del canvas
-                    img = canvas_result.image_data.astype(np.uint8)
-                    img_gray = np.mean(img[:, :, :3], axis=2)  # Convertir a escala de grises
+                    img_array = preprocess_canvas_image(canvas_result.image_data)
                     
-                    # Redimensionar a 8x8 (formato MNIST de sklearn)
-                    img_pil = Image.fromarray(img_gray.astype(np.uint8))
-                    img_resized = img_pil.resize((8, 8), Image.LANCZOS)
-                    img_array = np.array(img_resized, dtype=np.float64)
-                    
-                    # Escalar a rango 0-16 (como los datos de sklearn digits)
-                    if img_array.max() > 0:
-                        img_array = (img_array / img_array.max()) * 16.0
-                    
-                    # Mostrar imagen procesada
-                    st.write("**Imagen procesada (8x8):**")
-                    fig_draw, ax_draw = plt.subplots(figsize=(3, 3))
-                    ax_draw.imshow(img_array, cmap='gray_r')
-                    ax_draw.axis('off')
-                    st.pyplot(fig_draw)
-                    
-                    # Preparar para predicción
-                    img_flat = img_array.flatten().reshape(1, -1)
-                    
-                    modelo = st.session_state['modelo']
-                    scaler = st.session_state['scaler']
-                    pca = st.session_state['pca']
-                    usar_pca = st.session_state['usar_pca']
-                    
-                    img_scaled = scaler.transform(img_flat)
-                    if usar_pca and pca is not None:
-                        img_scaled = pca.transform(img_scaled)
-                    
-                    prediccion = modelo.predict(img_scaled)
-                    
-                    st.success(f"## 🎯 Dígito predicho: **{prediccion[0]}**")
-                    
-                    # Si el modelo tiene predict_proba
-                    if hasattr(modelo, 'predict_proba'):
-                        probs = modelo.predict_proba(img_scaled)[0]
-                        fig_prob, ax_prob = plt.subplots(figsize=(6, 3))
-                        colors = ['coral' if i != prediccion[0] else 'steelblue' for i in range(10)]
-                        ax_prob.bar(range(10), probs, color=colors)
-                        ax_prob.set_xticks(range(10))
-                        ax_prob.set_xlabel("Dígito")
-                        ax_prob.set_ylabel("Probabilidad")
-                        ax_prob.set_title("Probabilidades por clase")
-                        st.pyplot(fig_prob)
+                    if img_array is None:
+                        st.warning("No se detectó ningún dibujo. Intenta de nuevo.")
+                    else:
+                        # Mostrar comparación: imagen original vs procesada
+                        st.write("**Imagen procesada (8x8):**")
+                        fig_draw, axes_draw = plt.subplots(1, 2, figsize=(6, 3))
+                        
+                        # Original en miniatura
+                        orig_gray = np.mean(canvas_result.image_data[:,:,:3], axis=2)
+                        axes_draw[0].imshow(orig_gray, cmap='gray_r')
+                        axes_draw[0].set_title("Original", fontsize=10)
+                        axes_draw[0].axis('off')
+                        
+                        # Procesada 8x8
+                        axes_draw[1].imshow(img_array, cmap='gray_r', interpolation='nearest')
+                        axes_draw[1].set_title("Procesada 8x8", fontsize=10)
+                        axes_draw[1].axis('off')
+                        plt.tight_layout()
+                        st.pyplot(fig_draw)
+                        
+                        # Predecir
+                        pred, probs = predict_digit(img_array)
+                        
+                        st.success(f"## 🎯 Dígito predicho: **{pred}**")
+                        
+                        if probs is not None:
+                            fig_prob, ax_prob = plt.subplots(figsize=(6, 3))
+                            colors = ['coral' if i != pred else 'steelblue' for i in range(10)]
+                            ax_prob.bar(range(10), probs, color=colors)
+                            ax_prob.set_xticks(range(10))
+                            ax_prob.set_xlabel("Dígito")
+                            ax_prob.set_ylabel("Probabilidad")
+                            ax_prob.set_title("Probabilidades por clase")
+                            for i, p in enumerate(probs):
+                                if p > 0.05:
+                                    ax_prob.text(i, p + 0.01, f'{p:.2f}', ha='center', fontsize=8)
+                            st.pyplot(fig_prob)
+                        
+                        # Mostrar los 3 dígitos más similares del dataset
+                        st.write("**Dígitos similares del dataset de entrenamiento:**")
+                        digits_data = load_digits()
+                        mask = digits_data.target == pred
+                        similar_images = digits_data.images[mask][:5]
+                        fig_sim, axes_sim = plt.subplots(1, 5, figsize=(10, 2))
+                        for i, ax in enumerate(axes_sim):
+                            if i < len(similar_images):
+                                ax.imshow(similar_images[i], cmap='gray_r')
+                            ax.axis('off')
+                        plt.suptitle(f"Ejemplos del dígito {pred} en el dataset", fontsize=10)
+                        plt.tight_layout()
+                        st.pyplot(fig_sim)
                 else:
                     st.warning("Dibuja algo en el canvas primero.")
     
@@ -343,26 +430,40 @@ else:
         
         if uploaded_file is not None and st.button("🔍 Predecir Dígito (imagen subida)"):
             img_pil = Image.open(uploaded_file).convert('L')
-            img_resized = img_pil.resize((8, 8), Image.LANCZOS)
-            img_array = np.array(img_resized, dtype=np.float64)
+            img_array_up = np.array(img_pil, dtype=np.float64)
             
-            if img_array.max() > 0:
-                img_array = (img_array / img_array.max()) * 16.0
+            # Aplicar el mismo preprocesamiento de bounding box y centrado
+            from scipy.ndimage import gaussian_filter
+            threshold = 30
+            coords = np.argwhere(img_array_up > threshold)
+            if coords.size > 0:
+                y_min, x_min = coords.min(axis=0)
+                y_max, x_max = coords.max(axis=0)
+                digit_crop = img_array_up[y_min:y_max+1, x_min:x_max+1]
+                h, w = digit_crop.shape
+                max_dim = max(h, w)
+                padding = int(max_dim * 0.3)
+                square_size = max_dim + 2 * padding
+                square_img = np.zeros((square_size, square_size), dtype=np.float64)
+                y_offset = (square_size - h) // 2
+                x_offset = (square_size - w) // 2
+                square_img[y_offset:y_offset+h, x_offset:x_offset+w] = digit_crop
+                img_pil2 = Image.fromarray(square_img.astype(np.uint8))
+                img_resized = img_pil2.resize((8, 8), Image.LANCZOS)
+                img_array = np.array(img_resized, dtype=np.float64)
+                img_array = gaussian_filter(img_array, sigma=0.5)
+                if img_array.max() > 0:
+                    img_array = (img_array / img_array.max()) * 16.0
+            else:
+                img_resized = img_pil.resize((8, 8), Image.LANCZOS)
+                img_array = np.array(img_resized, dtype=np.float64)
+                if img_array.max() > 0:
+                    img_array = (img_array / img_array.max()) * 16.0
             
             fig_up, ax_up = plt.subplots(figsize=(3, 3))
-            ax_up.imshow(img_array, cmap='gray_r')
+            ax_up.imshow(img_array, cmap='gray_r', interpolation='nearest')
             ax_up.axis('off')
             st.pyplot(fig_up)
             
-            img_flat = img_array.flatten().reshape(1, -1)
-            modelo = st.session_state['modelo']
-            scaler = st.session_state['scaler']
-            pca = st.session_state['pca']
-            usar_pca = st.session_state['usar_pca']
-            
-            img_scaled = scaler.transform(img_flat)
-            if usar_pca and pca is not None:
-                img_scaled = pca.transform(img_scaled)
-            
-            prediccion = modelo.predict(img_scaled)
-            st.success(f"## 🎯 Dígito predicho: **{prediccion[0]}**")
+            pred, probs = predict_digit(img_array)
+            st.success(f"## 🎯 Dígito predicho: **{pred}**")
