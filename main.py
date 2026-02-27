@@ -267,60 +267,159 @@ else:
     
     def preprocess_canvas_image(image_data):
         """
-        Preprocesa la imagen del canvas para simular el formato real
-        de sklearn digits (8x8, rango 0-16, dígito centrado).
+        Pipeline de Digital Image Processing (DIP) para convertir
+        la imagen del canvas en una imagen compatible con sklearn digits (8x8, 0-16).
+        
+        Etapas:
+        1. Conversión a escala de grises
+        2. Binarización con umbral adaptativo (Otsu)
+        3. Operaciones morfológicas (cierre para rellenar huecos)
+        4. Detección de bounding box y recorte
+        5. Centrado por centro de masa
+        6. Resize a 8x8 con antialiasing
+        7. Suavizado gaussiano (simular estilo sklearn digits)
+        8. Normalización de contraste al rango 0-16
+        9. Ajuste de distribución de intensidad
         """
+        from scipy.ndimage import gaussian_filter, center_of_mass, zoom
+        from scipy.ndimage import binary_dilation, binary_closing
+        
         img = image_data.astype(np.uint8)
-        # Convertir a escala de grises
-        img_gray = np.mean(img[:, :, :3], axis=2)
         
-        # --- PASO 1: Encontrar bounding box del dígito dibujado ---
-        threshold = 30  # Umbral para detectar trazos
-        coords = np.argwhere(img_gray > threshold)
+        # ---- ETAPA 1: Escala de grises ----
+        img_gray = np.mean(img[:, :, :3], axis=2).astype(np.float64)
         
-        if coords.size == 0:
+        # ---- ETAPA 2: Binarización (Otsu simplificado) ----
+        threshold = 30
+        if img_gray.max() > 0:
+            # Umbral adaptativo: usar percentil de los píxeles no-cero
+            nonzero = img_gray[img_gray > 10]
+            if len(nonzero) > 0:
+                threshold = max(30, np.percentile(nonzero, 15))
+        
+        binary_mask = img_gray > threshold
+        
+        if binary_mask.sum() == 0:
             return None  # No se dibujó nada
         
+        # ---- ETAPA 3: Operaciones morfológicas ----
+        # Cierre morfológico para rellenar huecos en los trazos
+        struct = np.ones((5, 5), dtype=bool)
+        binary_closed = binary_closing(binary_mask, structure=struct, iterations=2)
+        # Dilatación leve para engrosar trazos finos
+        struct_dilate = np.ones((3, 3), dtype=bool)
+        binary_dilated = binary_dilation(binary_closed, structure=struct_dilate, iterations=1)
+        
+        # Aplicar máscara morfológica a la imagen original
+        img_processed = img_gray * binary_dilated.astype(np.float64)
+        
+        # ---- ETAPA 4: Bounding box y recorte ----
+        coords = np.argwhere(binary_dilated)
         y_min, x_min = coords.min(axis=0)
         y_max, x_max = coords.max(axis=0)
         
-        # Recortar solo la región del dígito
-        digit_crop = img_gray[y_min:y_max+1, x_min:x_max+1]
+        digit_crop = img_processed[y_min:y_max+1, x_min:x_max+1]
         
-        # --- PASO 2: Hacer la región cuadrada con padding ---
+        # ---- ETAPA 5: Centrado por centro de masa en cuadrado ----
         h, w = digit_crop.shape
         max_dim = max(h, w)
-        # Agregar padding proporcional (20% de margen como en sklearn digits)
-        padding = int(max_dim * 0.3)
         
+        # Padding del 30% (similar a sklearn digits donde los bordes tienen valores bajos)
+        padding = int(max_dim * 0.35)
         square_size = max_dim + 2 * padding
+        
         square_img = np.zeros((square_size, square_size), dtype=np.float64)
         
-        # Centrar el dígito en el cuadrado
-        y_offset = (square_size - h) // 2
-        x_offset = (square_size - w) // 2
+        # Calcular centro de masa del dígito recortado
+        cy, cx = center_of_mass(digit_crop)
+        
+        # Colocar el dígito de forma que su centro de masa quede en el centro del cuadrado
+        target_cy = square_size // 2
+        target_cx = square_size // 2
+        
+        y_offset = int(target_cy - cy)
+        x_offset = int(target_cx - cx)
+        
+        # Clamp offsets para no salirse del cuadrado
+        y_offset = max(0, min(y_offset, square_size - h))
+        x_offset = max(0, min(x_offset, square_size - w))
+        
         square_img[y_offset:y_offset+h, x_offset:x_offset+w] = digit_crop
         
-        # --- PASO 3: Redimensionar a 28x28 (visualización) ---
+        # ---- ETAPA 6: Resize a 8x8 con antialiasing ----
         img_pil = Image.fromarray(square_img.astype(np.uint8))
-        img_28 = img_pil.resize((28, 28), Image.LANCZOS)
-        img_28_array = np.array(img_28, dtype=np.float64)
+        img_8x8 = img_pil.resize((8, 8), Image.LANCZOS)
+        img_array = np.array(img_8x8, dtype=np.float64)
         
-        # --- PASO 4: Redimensionar de 28x28 a 8x8 (formato sklearn digits) ---
-        img_8 = img_pil.resize((8, 8), Image.LANCZOS)
-        img_8_array = np.array(img_8, dtype=np.float64)
+        # ---- ETAPA 7: Suavizado gaussiano ----
+        # Las imágenes de sklearn digits tienen un suavizado natural
+        # por cómo fueron originalmente creadas (escritura suave a baja resolución)
+        img_array = gaussian_filter(img_array, sigma=0.6)
         
-        # --- PASO 5: Aplicar suavizado gaussiano leve ---
-        from scipy.ndimage import gaussian_filter
-        img_8_array = gaussian_filter(img_8_array, sigma=0.5)
+        # ---- ETAPA 8: Normalización de contraste al rango 0-16 ----
+        if img_array.max() > 0:
+            img_array = (img_array / img_array.max()) * 16.0
         
-        # --- PASO 6: Escalar al rango 0-16 (formato sklearn digits) ---
-        if img_28_array.max() > 0:
-            img_28_array = (img_28_array / img_28_array.max()) * 16.0
-        if img_8_array.max() > 0:
-            img_8_array = (img_8_array / img_8_array.max()) * 16.0
+        # ---- ETAPA 9: Ajuste de distribución de intensidad ----
+        # Las imágenes del dataset tienen:
+        # - Media global ~4.88, Std ~6.0
+        # - Bordes (fila/col 0 y 7) con valores bajos (~2.3 promedio)
+        # - Centro de masa cerca de (3.5, 3.5) en la grid 8x8
+        # Atenuar bordes para simular el estilo del dataset
+        border_attenuation = np.ones((8, 8), dtype=np.float64)
+        border_attenuation[0, :] *= 0.4
+        border_attenuation[7, :] *= 0.4
+        border_attenuation[:, 0] *= 0.4
+        border_attenuation[:, 7] *= 0.4
+        # Esquinas aún más atenuadas
+        for r, c in [(0,0),(0,7),(7,0),(7,7)]:
+            border_attenuation[r, c] *= 0.3
         
-        return img_8_array, img_28_array
+        img_array *= border_attenuation
+        
+        # Re-normalizar al rango 0-16 después de atenuación
+        if img_array.max() > 0:
+            img_array = (img_array / img_array.max()) * 16.0
+        
+        # Redondear a enteros como en el dataset original
+        img_array = np.round(img_array)
+        
+        return img_array
+    
+    def get_dip_stages(image_data):
+        """
+        Retorna las etapas intermedias del DIP para visualización.
+        """
+        from scipy.ndimage import gaussian_filter, center_of_mass
+        from scipy.ndimage import binary_dilation, binary_closing
+        
+        stages = {}
+        img = image_data.astype(np.uint8)
+        
+        # Etapa 1: Escala de grises
+        img_gray = np.mean(img[:, :, :3], axis=2).astype(np.float64)
+        stages['1. Escala de grises'] = img_gray.copy()
+        
+        # Etapa 2: Binarización
+        threshold = 30
+        nonzero = img_gray[img_gray > 10]
+        if len(nonzero) > 0:
+            threshold = max(30, np.percentile(nonzero, 15))
+        binary_mask = img_gray > threshold
+        stages['2. Binarización'] = binary_mask.astype(np.float64) * 255
+        
+        # Etapa 3: Morfología
+        struct = np.ones((5, 5), dtype=bool)
+        binary_closed = binary_closing(binary_mask, structure=struct, iterations=2)
+        struct_dilate = np.ones((3, 3), dtype=bool)
+        binary_dilated = binary_dilation(binary_closed, structure=struct_dilate, iterations=1)
+        stages['3. Morfología'] = binary_dilated.astype(np.float64) * 255
+        
+        # Etapa 4: Imagen filtrada
+        img_processed = img_gray * binary_dilated.astype(np.float64)
+        stages['4. Filtrada'] = img_processed.copy()
+        
+        return stages
     
     def predict_digit(img_array):
         """Realiza la predicción con el modelo entrenado."""
@@ -372,39 +471,54 @@ else:
         with col_result:
             if st.button("🔍 Predecir Dígito", type="primary"):
                 if canvas_result.image_data is not None:
-                    result = preprocess_canvas_image(canvas_result.image_data)
+                    img_array = preprocess_canvas_image(canvas_result.image_data)
                     
-                    if result is None:
+                    if img_array is None:
                         st.warning("No se detectó ningún dibujo. Intenta de nuevo.")
                     else:
-                        img_8_array, img_28_array = result
+                        # Mostrar etapas del pipeline DIP
+                        stages = get_dip_stages(canvas_result.image_data)
                         
-                        # Mostrar comparación: original vs 28x28 vs 8x8
-                        st.write("**Procesamiento de la imagen:**")
-                        fig_draw, axes_draw = plt.subplots(1, 3, figsize=(9, 3))
+                        st.write("**Pipeline DIP (Digital Image Processing):**")
+                        fig_dip, axes_dip = plt.subplots(1, len(stages) + 1, figsize=(14, 3))
                         
-                        # Original en miniatura
-                        orig_gray = np.mean(canvas_result.image_data[:,:,:3], axis=2)
-                        axes_draw[0].imshow(orig_gray, cmap='gray_r')
-                        axes_draw[0].set_title("Original (280x280)", fontsize=10)
-                        axes_draw[0].axis('off')
+                        for idx, (name, stage_img) in enumerate(stages.items()):
+                            axes_dip[idx].imshow(stage_img, cmap='gray_r')
+                            axes_dip[idx].set_title(name, fontsize=8)
+                            axes_dip[idx].axis('off')
                         
-                        # 28x28
-                        axes_draw[1].imshow(img_28_array, cmap='gray_r', interpolation='nearest')
-                        axes_draw[1].set_title("Redimensionada (28x28)", fontsize=10)
-                        axes_draw[1].axis('off')
-                        
-                        # 8x8 para el modelo
-                        axes_draw[2].imshow(img_8_array, cmap='gray_r', interpolation='nearest')
-                        axes_draw[2].set_title("Modelo (8x8)", fontsize=10)
-                        axes_draw[2].axis('off')
+                        # Resultado final 8x8
+                        axes_dip[-1].imshow(img_array, cmap='gray_r', interpolation='nearest')
+                        axes_dip[-1].set_title('5. Final (8x8)', fontsize=8)
+                        axes_dip[-1].axis('off')
                         plt.tight_layout()
-                        st.pyplot(fig_draw)
+                        st.pyplot(fig_dip)
                         
-                        # Predecir con la 8x8
-                        pred, probs = predict_digit(img_8_array)
+                        # Comparar con una muestra real del dataset
+                        st.write("**Comparación con muestra real del dataset:**")
+                        fig_cmp, axes_cmp = plt.subplots(1, 2, figsize=(5, 2.5))
+                        axes_cmp[0].imshow(img_array, cmap='gray_r', interpolation='nearest')
+                        axes_cmp[0].set_title("Tu dibujo (procesado)", fontsize=9)
+                        axes_cmp[0].axis('off')
+                        
+                        # Predecir primero para mostrar ejemplo del dígito predicho
+                        pred, probs = predict_digit(img_array)
+                        
+                        # Mostrar muestra real del dataset al lado
+                        digits_data = load_digits()
+                        mask = digits_data.target == pred
+                        sample_real = digits_data.images[mask][0]
+                        axes_cmp[1].imshow(sample_real, cmap='gray_r', interpolation='nearest')
+                        axes_cmp[1].set_title(f"Muestra real (dígito {pred})", fontsize=9)
+                        axes_cmp[1].axis('off')
+                        plt.tight_layout()
+                        st.pyplot(fig_cmp)
                         
                         st.success(f"## 🎯 Dígito predicho: **{pred}**")
+                        
+                        # Mostrar valores numéricos de la imagen procesada
+                        with st.expander("Ver matriz de valores (8x8)"):
+                            st.dataframe(pd.DataFrame(img_array).round(1))
                         
                         if probs is not None:
                             fig_prob, ax_prob = plt.subplots(figsize=(6, 3))
@@ -419,15 +533,13 @@ else:
                                     ax_prob.text(i, p + 0.01, f'{p:.2f}', ha='center', fontsize=8)
                             st.pyplot(fig_prob)
                         
-                        # Mostrar los 3 dígitos más similares del dataset
-                        st.write("**Dígitos similares del dataset de entrenamiento:**")
-                        digits_data = load_digits()
-                        mask = digits_data.target == pred
+                        # Mostrar los 5 dígitos más similares del dataset
+                        st.write("**Ejemplos del dataset para el dígito predicho:**")
                         similar_images = digits_data.images[mask][:5]
                         fig_sim, axes_sim = plt.subplots(1, 5, figsize=(10, 2))
                         for i, ax in enumerate(axes_sim):
                             if i < len(similar_images):
-                                ax.imshow(similar_images[i], cmap='gray_r')
+                                ax.imshow(similar_images[i], cmap='gray_r', interpolation='nearest')
                             ax.axis('off')
                         plt.suptitle(f"Ejemplos del dígito {pred} en el dataset", fontsize=10)
                         plt.tight_layout()
