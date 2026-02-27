@@ -301,20 +301,26 @@ else:
         x_offset = (square_size - w) // 2
         square_img[y_offset:y_offset+h, x_offset:x_offset+w] = digit_crop
         
-        # --- PASO 3: Redimensionar a 8x8 usando antialiasing ---
+        # --- PASO 3: Redimensionar a 28x28 (visualización) ---
         img_pil = Image.fromarray(square_img.astype(np.uint8))
-        img_resized = img_pil.resize((8, 8), Image.LANCZOS)
-        img_array = np.array(img_resized, dtype=np.float64)
+        img_28 = img_pil.resize((28, 28), Image.LANCZOS)
+        img_28_array = np.array(img_28, dtype=np.float64)
         
-        # --- PASO 4: Aplicar suavizado gaussiano leve ---
+        # --- PASO 4: Redimensionar de 28x28 a 8x8 (formato sklearn digits) ---
+        img_8 = img_pil.resize((8, 8), Image.LANCZOS)
+        img_8_array = np.array(img_8, dtype=np.float64)
+        
+        # --- PASO 5: Aplicar suavizado gaussiano leve ---
         from scipy.ndimage import gaussian_filter
-        img_array = gaussian_filter(img_array, sigma=0.5)
+        img_8_array = gaussian_filter(img_8_array, sigma=0.5)
         
-        # --- PASO 5: Escalar al rango 0-16 (formato sklearn digits) ---
-        if img_array.max() > 0:
-            img_array = (img_array / img_array.max()) * 16.0
+        # --- PASO 6: Escalar al rango 0-16 (formato sklearn digits) ---
+        if img_28_array.max() > 0:
+            img_28_array = (img_28_array / img_28_array.max()) * 16.0
+        if img_8_array.max() > 0:
+            img_8_array = (img_8_array / img_8_array.max()) * 16.0
         
-        return img_array
+        return img_8_array, img_28_array
     
     def predict_digit(img_array):
         """Realiza la predicción con el modelo entrenado."""
@@ -366,30 +372,37 @@ else:
         with col_result:
             if st.button("🔍 Predecir Dígito", type="primary"):
                 if canvas_result.image_data is not None:
-                    img_array = preprocess_canvas_image(canvas_result.image_data)
+                    result = preprocess_canvas_image(canvas_result.image_data)
                     
-                    if img_array is None:
+                    if result is None:
                         st.warning("No se detectó ningún dibujo. Intenta de nuevo.")
                     else:
-                        # Mostrar comparación: imagen original vs procesada
-                        st.write("**Imagen procesada (8x8):**")
-                        fig_draw, axes_draw = plt.subplots(1, 2, figsize=(6, 3))
+                        img_8_array, img_28_array = result
+                        
+                        # Mostrar comparación: original vs 28x28 vs 8x8
+                        st.write("**Procesamiento de la imagen:**")
+                        fig_draw, axes_draw = plt.subplots(1, 3, figsize=(9, 3))
                         
                         # Original en miniatura
                         orig_gray = np.mean(canvas_result.image_data[:,:,:3], axis=2)
                         axes_draw[0].imshow(orig_gray, cmap='gray_r')
-                        axes_draw[0].set_title("Original", fontsize=10)
+                        axes_draw[0].set_title("Original (280x280)", fontsize=10)
                         axes_draw[0].axis('off')
                         
-                        # Procesada 8x8
-                        axes_draw[1].imshow(img_array, cmap='gray_r', interpolation='nearest')
-                        axes_draw[1].set_title("Procesada 8x8", fontsize=10)
+                        # 28x28
+                        axes_draw[1].imshow(img_28_array, cmap='gray_r', interpolation='nearest')
+                        axes_draw[1].set_title("Redimensionada (28x28)", fontsize=10)
                         axes_draw[1].axis('off')
+                        
+                        # 8x8 para el modelo
+                        axes_draw[2].imshow(img_8_array, cmap='gray_r', interpolation='nearest')
+                        axes_draw[2].set_title("Modelo (8x8)", fontsize=10)
+                        axes_draw[2].axis('off')
                         plt.tight_layout()
                         st.pyplot(fig_draw)
                         
-                        # Predecir
-                        pred, probs = predict_digit(img_array)
+                        # Predecir con la 8x8
+                        pred, probs = predict_digit(img_8_array)
                         
                         st.success(f"## 🎯 Dígito predicho: **{pred}**")
                         
